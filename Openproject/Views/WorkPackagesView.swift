@@ -305,22 +305,29 @@ struct WorkPackagesView: View {
     
     private func loadData() {
         isLoading = true
-        
-        // Load work packages
+
+        // Load work packages first, then fetch related metadata concurrently
         loadWorkPackages { success in
-            if success {
-                loadWorkPackageTypes()
-                loadWorkPackageStatuses()
-                loadWorkPackagePriorities()
-                
-                // Explicitly load missing project details
-                self.loadMissingProjectDetails {
-                    // Mark loading as complete
-                    self.isLoading = false
-                    print("UI refreshed with project data")
-                }
-            } else {
+            guard success else {
                 self.isLoading = false
+                return
+            }
+
+            let group = DispatchGroup()
+
+            group.enter()
+            loadWorkPackageTypes { group.leave() }
+
+            group.enter()
+            loadWorkPackageStatuses { group.leave() }
+
+            group.enter()
+            loadWorkPackagePriorities { group.leave() }
+
+            group.notify(queue: .main) {
+                self.loadMissingProjectDetails {
+                    self.isLoading = false
+                }
             }
         }
     }
@@ -543,7 +550,7 @@ struct WorkPackagesView: View {
         }
     }
     
-    private func loadWorkPackageTypes() {
+    private func loadWorkPackageTypes(completion: (() -> Void)? = nil) {
         guard let token = appState.accessToken else { return }
         
         // Construct the types endpoint URL
@@ -601,13 +608,16 @@ struct WorkPackagesView: View {
                 }
             }
             
-            DispatchQueue.main.async(execute: workItem)
+            DispatchQueue.main.async {
+                workItem.perform()
+                completion?()
+            }
         }
-        
+
         task.resume()
     }
-    
-    private func loadWorkPackageStatuses() {
+
+    private func loadWorkPackageStatuses(completion: (() -> Void)? = nil) {
         guard let token = appState.accessToken else { return }
         
         // Construct the statuses endpoint URL
@@ -665,13 +675,16 @@ struct WorkPackagesView: View {
                 }
             }
             
-            DispatchQueue.main.async(execute: workItem)
+            DispatchQueue.main.async {
+                workItem.perform()
+                completion?()
+            }
         }
-        
+
         task.resume()
     }
-    
-    private func loadWorkPackagePriorities() {
+
+    private func loadWorkPackagePriorities(completion: (() -> Void)? = nil) {
         guard let token = appState.accessToken else { return }
         
         // Construct the priorities endpoint URL
@@ -729,9 +742,12 @@ struct WorkPackagesView: View {
                 }
             }
             
-            DispatchQueue.main.async(execute: workItem)
+            DispatchQueue.main.async {
+                workItem.perform()
+                completion?()
+            }
         }
-        
+
         task.resume()
     }
     
