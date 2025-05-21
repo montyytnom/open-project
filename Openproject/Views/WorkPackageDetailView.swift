@@ -48,6 +48,13 @@ struct HTMLTextView: UIViewRepresentable {
                     font-family: -apple-system, system-ui;
                     font-size: 16px;
                 }
+
+                /* Ensure images scale to the width of the text view so they
+                   don't force the view to grow and appear zoomed */
+                img {
+                    max-width: 100%;
+                    height: auto;
+                }
             </style>
         """
         let htmlWithCSS = css + cleanedHtml
