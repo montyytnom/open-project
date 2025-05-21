@@ -1,0 +1,21 @@
+// iOS-specific build configuration
+
+SDKROOT = iphoneos
+TARGETED_DEVICE_FAMILY = 1,2
+IPHONEOS_DEPLOYMENT_TARGET = 15.0
+
+// Info.plist configuration
+// We use a custom BuildInfo.plist and disable automatic Info.plist generation
+// The original Info.plist has been moved to _backup/Info.plist.bak to prevent conflicts
+INFOPLIST_FILE = $(SRCROOT)/Openproject/BuildInfo.plist
+GENERATE_INFOPLIST_FILE = NO
+INFOPLIST_PREPROCESS = NO
+INFOPLIST_OUTPUT_FORMAT = same-as-input
+INFOPLIST_EXPAND_BUILD_SETTINGS = YES
+
+// Turn off copying phases that might cause duplication
+COPY_PHASE_STRIP = NO
+
+// Bundle Settings
+PRODUCT_BUNDLE_IDENTIFIER = com.example.Openproject
+PRODUCT_NAME = $(TARGET_NAME) 

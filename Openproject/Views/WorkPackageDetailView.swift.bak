@@ -1,0 +1,1462 @@
+//
+//  WorkPackageDetailView.swift
+//  Openproject
+//
+//  Created by A on 3/18/25.
+//
+
+import SwiftUI
+import UIKit
+import Combine
+#if os(iOS)
+import QuickLook
+#elseif os(macOS)
+import AppKit
+#endif
+
+// Import models directly
+@_implementationOnly import struct Openproject.WorkPackage
+@_implementationOnly import struct Openproject.WorkPackageType
+@_implementationOnly import struct Openproject.WorkPackageStatus
+@_implementationOnly import struct Openproject.WorkPackagePriority
+@_implementationOnly import struct Openproject.Project
+@_implementationOnly import class Openproject.AppState
+@_implementationOnly import struct Openproject.APIErrorResponse
+@_implementationOnly import struct Openproject.User
+@_implementationOnly import struct Openproject.UserCollection
+@_implementationOnly import struct Openproject.UserEmbedded
+
+struct WorkPackageDetailView: View {
+    @EnvironmentObject var appState: AppState
+    @State var workPackage: WorkPackage
+    
+    @State private var isLoading: Bool = false
+    @State private var types: [WorkPackageType] = []
+    @State private var statuses: [WorkPackageStatus] = []
+    @State private var priorities: [WorkPackagePriority] = []
+    @State private var errorMessage: String?
+    @State private var showTimeEntryForm: Bool = false
+    @State private var showingEditWorkPackage: Bool = false
+    @State private var updatedWorkPackage: WorkPackage
+    @State private var showingDeleteConfirmation = false
+    @State private var showingImagePicker = false
+    @State private var selectedImage: UIImage? = nil
+    @State private var showingAssignees = false
+    @Environment(\.presentationMode) var presentationMode
+    
+    // New state variables for activities, attachments, and comments
+    @State private var activities: [Activity] = []
+    @State private var isLoadingActivities: Bool = false
+    @State private var attachments: [Attachment] = []
+    @State private var isLoadingAttachments: Bool = false
+    @State private var newComment: String = ""
+    @State private var isSubmittingComment: Bool = false
+    @State private var commentError: String?
+    @State private var showAttachmentPicker: Bool = false
+    @State private var allUsers: [User] = []
+    @State private var isLoadingUsers: Bool = false
+    @State private var filteredUsers: [User] = []
+    @State private var showUserMentions: Bool = false
+    @State private var mentionSearchText: String = ""
+    @State private var cursorPosition: Int = 0
+    @State private var activityError: String?
+    @State private var activitiesSectionExpanded: Bool = false
+    @State private var attachmentsSectionExpanded: Bool = true
+    @State private var commentSectionExpanded: Bool = true
+    @State private var customFields: [CustomField] = []
+    @State private var comments: [Comment] = []
+    
+    // Add these state variables to the WorkPackageDetailView struct
+    @State private var showRemindersView = false
+    @State private var activeRemindersCount = 0
+    
+    init(workPackage: WorkPackage) {
+        self.workPackage = workPackage
+        self._updatedWorkPackage = State(initialValue: workPackage)
+    }
+    
+    private var typeId: Int? {
+        guard let typeLink = workPackage.links.type,
+              let href = typeLink.href else { return nil }
+        return self.extractIdFromHref(href)
+    }
+    
+    private var statusId: Int? {
+        guard let statusLink = workPackage.links.status,
+              let href = statusLink.href else { return nil }
+        return self.extractIdFromHref(href)
+    }
+    
+    private var priorityId: Int? {
+        guard let priorityLink = workPackage.links.priority,
+              let href = priorityLink.href else { return nil }
+        return self.extractIdFromHref(href)
+    }
+    
+    private var type: WorkPackageType? {
+        guard let id = typeId else { return nil }
+        return types.first { $0.id == id }
+    }
+    
+    private var status: WorkPackageStatus? {
+        guard let id = statusId else { return nil }
+        return statuses.first { $0.id == id }
+    }
+    
+    private var priority: WorkPackagePriority? {
+        guard let id = priorityId else { return nil }
+        return priorities.first { $0.id == id }
+    }
+    
+    var body: some View {
+        content
+    }
+    
+    // Break down the main content into smaller components
+    private var content: some View {
+        ZStack {
+            if isLoading {
+                ProgressView()
+                    .scaleEffect(1.5)
+            } else {
+                WorkPackageBody(
+                    workPackage: workPackage,
+                    isLoading: isLoading,
+                    isUpdating: false,
+                    projectId: projectId ?? 0,
+                    typeId: typeId,
+                    statusId: statusId,
+                    assigneeId: assigneeId,
+                    attachments: attachments,
+                    descriptionSectionExpanded: $descriptionSectionExpanded,
+                    attachmentsSectionExpanded: $attachmentsSectionExpanded,
+                    commentSectionExpanded: $commentSectionExpanded,
+                    customFieldsSectionExpanded: $customFieldsSectionExpanded,
+                    commentText: $commentText,
+                    handleAssigneeChange: handleAssigneeChange,
+                    addComment: addComment,
+                    deleteAttachment: deleteAttachment
+                )
+            }
+        }
+        .navigationTitle(workPackage.subject)
+        .navigationBarItems(trailing: editButton)
+        .sheet(isPresented: $showingAssignees) {
+            UserSelectionView(selectedUser: workPackage.links.assignee?.title, onSelect: { user in
+                if let user = user {
+                    handleAssigneeChange(user.id)
+                } else {
+                    handleAssigneeChange(nil)
+                }
+            })
+        }
+        .sheet(isPresented: $showingEditWorkPackage) {
+            EditWorkPackageView(
+                workPackage: workPackage,
+                updatedWorkPackage: $updatedWorkPackage, 
+                onUpdate: { updatedWP in
+                    self.workPackage = updatedWP
+                    self.isLoading = false
+                }
+            )
+        }
+        .sheet(isPresented: $showAttachmentPicker) {
+            AttachmentPickerView(onSelect: { url in
+                uploadAttachment(url)
+            })
+        }
+        .sheet(isPresented: $showingImagePicker) {
+            ImagePicker(selectedImage: $selectedImage, onSelect: { image in
+                if let image = image, let imageData = image.jpegData(compressionQuality: 0.8) {
+                    uploadAttachment(imageData, "image.jpg", "image/jpeg")
+                }
+            })
+        }
+        .alert(isPresented: $showingDeleteConfirmation) {
+            Alert(
+                title: Text("Delete Work Package"),
+                message: Text("Are you sure you want to delete this work package? This action cannot be undone."),
+                primaryButton: .destructive(Text("Delete")) {
+                    deleteWorkPackage()
+                },
+                secondaryButton: .cancel()
+            )
+        }
+    }
+    
+    private var editButton: some View {
+        Menu {
+            Button(action: {
+                showingEditWorkPackage = true
+            }) {
+                Label("Edit", systemImage: "pencil")
+            }
+            
+            Button(action: {
+                showingDeleteConfirmation = true
+            }) {
+                Label("Delete", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+    }
+    
+    private func infoRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundColor(.secondary)
+            Spacer()
+            Text(value)
+        }
+    }
+    
+    private func loadWorkPackageDetails() {
+        // Implement the logic to load work package details
+    }
+    
+    private func formattedDate(_ dateString: String) -> String {
+        let dateFormatter = ISO8601DateFormatter()
+        dateFormatter.formatOptions = [.withInternetDateTime]
+        
+        if let date = dateFormatter.date(from: dateString) {
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateStyle = .medium
+            displayFormatter.timeStyle = .short
+            displayFormatter.doesRelativeDateFormatting = true
+            return displayFormatter.string(from: date)
+        }
+        
+        return dateString
+    }
+    
+    private func extractIdFromHref(_ href: String) -> Int? {
+        let components = href.split(separator: "/")
+        if let last = components.last, let id = Int(last) {
+            return id
+        }
+        return nil
+    }
+    
+    private func uploadAttachment() {
+        isLoading = true
+        
+        let workPackageId = workPackage.id
+        
+        guard let imageData = selectedImage?.jpegData(compressionQuality: 0.8) else {
+            isLoading = false
+            errorMessage = "Failed to prepare image data"
+            return
+        }
+        
+        guard let url = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackageId)/attachments") else {
+            isLoading = false
+            errorMessage = "Invalid API URL"
+            return
+        }
+        
+        // Generate a random filename with .jpg extension
+        let filename = UUID().uuidString + ".jpg"
+        
+        // Create multipart form data request
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        
+        let boundary = "Boundary-\(UUID().uuidString)"
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+        request.setValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        // Create the body
+        var body = Data()
+        
+        // Add metadata part
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"metadata\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: application/json\r\n\r\n".data(using: .utf8)!)
+        
+        let metadata = ["fileName": filename, "description": "Uploaded from iOS app"]
+        let metadataData = try! JSONSerialization.data(withJSONObject: metadata, options: [])
+        body.append(metadataData)
+        body.append("\r\n".data(using: .utf8)!)
+        
+        // Add file part
+        body.append("--\(boundary)\r\n".data(using: .utf8)!)
+        body.append("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n".data(using: .utf8)!)
+        body.append("Content-Type: image/jpeg\r\n\r\n".data(using: .utf8)!)
+        body.append(imageData)
+        body.append("\r\n".data(using: .utf8)!)
+        
+        // Add final boundary
+        body.append("--\(boundary)--\r\n".data(using: .utf8)!)
+        
+        request.httpBody = body
+        
+        // Make the API call
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isLoading = false
+                selectedImage = nil
+                showingImagePicker = false
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 201 {
+                    // Successfully uploaded, refresh attachments
+                    fetchAttachments()
+                } else {
+                    // Handle error
+                    if let error = error {
+                        errorMessage = "Upload failed: \(error.localizedDescription)"
+                    } else {
+                        errorMessage = "Upload failed with unknown error"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func fetchAttachments() {
+        // Method to refresh attachments after upload
+        // Implement according to your API
+    }
+    
+    private func deleteWorkPackage() {
+        isLoading = true
+        
+        guard let url = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackage.id)") else {
+            isLoading = false
+            errorMessage = "Invalid API URL"
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        // Make the API call
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isLoading = false
+                
+                if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 204 {
+                    // Successfully deleted, go back to previous screen
+                    presentationMode.wrappedValue.dismiss()
+                } else {
+                    // Handle error
+                    if let error = error {
+                        errorMessage = "Failed to delete work package: \(error.localizedDescription)"
+                    } else {
+                        errorMessage = "Failed to delete work package"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func deleteAttachment(_ attachmentId: String) {
+        guard let url = URL(string: "\(appState.apiBaseURL)/attachments/\(attachmentId)") else {
+            errorMessage = "Invalid attachment URL"
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "DELETE"
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        isLoading = true
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isLoading = false
+                
+                if let error = error {
+                    errorMessage = "Failed to delete attachment: \(error.localizedDescription)"
+                    return
+                }
+                
+                // Check response status code
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        // Success - remove attachment from local array
+                        if let index = attachments.firstIndex(where: { $0.id == Int(attachmentId) }) {
+                            attachments.remove(at: index)
+                        }
+                    } else {
+                        errorMessage = "Failed to delete attachment: server returned error code \(httpResponse.statusCode)"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func addComment() {
+        guard !newComment.isEmpty else { return }
+        
+        isSubmittingComment = true
+        commentError = nil
+        
+        // Construct full URL
+        guard let commentUrl = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackage.id)/activities") else {
+            commentError = "Invalid API URL"
+            isSubmittingComment = false
+            return
+        }
+        
+        // Create request body
+        let body: [String: Any] = [
+            "comment": [
+                "raw": newComment
+            ]
+        ]
+        
+        // Prepare request
+        var request = URLRequest(url: commentUrl)
+        request.httpMethod = "POST"
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        // Convert body to JSON data
+        do {
+            let jsonData = try JSONSerialization.data(withJSONObject: body)
+            request.httpBody = jsonData
+        } catch {
+            commentError = "Failed to prepare request data: \(error.localizedDescription)"
+            isSubmittingComment = false
+            return
+        }
+        
+        // Make the API call
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isSubmittingComment = false
+                
+                if let error = error {
+                    commentError = "Failed to add comment: \(error.localizedDescription)"
+                    return
+                }
+                
+                // Check response status code
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        // Success - clear the comment field and reload activities
+                        self.newComment = ""
+                        self.loadActivities()
+                    } else {
+                        if let data = data {
+                            do {
+                                let errorResponse = try JSONDecoder().decode(APIErrorResponse.self, from: data)
+                                commentError = errorResponse.message ?? "Error adding comment"
+                            } catch {
+                                commentError = "Server returned error code: \(httpResponse.statusCode)"
+                            }
+                        } else {
+                            commentError = "Server returned error code: \(httpResponse.statusCode)"
+                        }
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func loadActivities() {
+        isLoadingActivities = true
+        activityError = nil
+        
+        // Construct full URL
+        guard let activitiesUrl = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackage.id)/activities") else {
+            activityError = "Invalid API URL"
+            isLoadingActivities = false
+            return
+        }
+        
+        // Prepare request
+        var request = URLRequest(url: activitiesUrl)
+        request.httpMethod = "GET"
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        // Make the API call
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isLoadingActivities = false
+                
+                if let error = error {
+                    activityError = "Failed to load activities: \(error.localizedDescription)"
+                    return
+                }
+                
+                // Check response status code
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        // Success - parse activities
+                        if let data = data {
+                            do {
+                                let activityCollection = try JSONDecoder().decode(ActivityCollection.self, from: data)
+                                self.activities = activityCollection.embedded.elements
+                                
+                                // Extract comments from activities
+                                self.comments = self.activities
+                                    .filter { $0.isComment }
+                                    .map { activity in
+                                        Comment(
+                                            id: String(activity.id),
+                                            text: activity.comment?.raw ?? "",
+                                            createdAt: activity.createdAt,
+                                            author: User(
+                                                id: activity.user.id,
+                                                name: activity.user.name,
+                                                firstName: "",  // Using empty strings for required fields
+                                                lastName: "",
+                                                email: nil,
+                                                avatar: nil,
+                                                status: "",
+                                                language: "",
+                                                admin: false,
+                                                createdAt: "",
+                                                updatedAt: ""
+                                            )
+                                        )
+                            }
+                        } catch {
+                            activityError = "Failed to parse activities: \(error.localizedDescription)"
+                        }
+                    } else {
+                        activityError = "Server returned error code: \(httpResponse.statusCode)"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func handleAssigneeChange(user: User?) {
+        let workPackageId = workPackage.id
+        
+        guard let url = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackageId)") else {
+            errorMessage = "Invalid URL"
+            return
+        }
+        
+        var requestBody: [String: Any] = [
+            "_links": [
+                "assignee": [
+                    "href": user != nil ? "/api/v3/users/\(user!.id)" : nil
+                ]
+            ]
+        ]
+        
+        guard let requestData = try? JSONSerialization.data(withJSONObject: requestBody) else {
+            errorMessage = "Failed to prepare request"
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "PATCH"
+        request.httpBody = requestData
+        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+            
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                if let error = error {
+                    errorMessage = "Error: \(error.localizedDescription)"
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        // Update the assignee in our local work package
+                        workPackage = workPackage
+                        // Refresh work package (since server might have updated other fields)
+                        fetchWorkPackage()
+                    } else {
+                        errorMessage = "Server error: \(httpResponse.statusCode)"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+    
+    private func formattedDate(from dateString: String) -> String? {
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyy-MM-dd'T'HH:mm:ssZ"
+        
+        if let date = dateFormatter.date(from: dateString) {
+            let displayFormatter = DateFormatter()
+            displayFormatter.dateStyle = .medium
+            displayFormatter.timeStyle = .short
+            return displayFormatter.string(from: date)
+        }
+        
+        return nil
+    }
+    
+    // Fetch work package details from API
+    private func fetchWorkPackage() {
+        isLoading = true
+        
+        guard let url = URL(string: "\(appState.apiBaseURL)/work_packages/\(workPackage.id)") else {
+            isLoading = false
+            errorMessage = "Invalid API URL"
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.addValue("application/json", forHTTPHeaderField: "Accept")
+        request.addValue("Basic \(appState.accessToken ?? "")", forHTTPHeaderField: "Authorization")
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem { [self] in
+                isLoading = false
+                
+                if let error = error {
+                    errorMessage = "Failed to load work package: \(error.localizedDescription)"
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse {
+                    if httpResponse.statusCode >= 200 && httpResponse.statusCode < 300 {
+                        if let data = data {
+                            do {
+                                let updatedWorkPackage = try JSONDecoder().decode(WorkPackage.self, from: data)
+                                self.workPackage = updatedWorkPackage
+                                
+                                // Also fetch related data
+                                fetchAttachments()
+                                loadActivities()
+                            } catch {
+                                errorMessage = "Failed to parse work package: \(error.localizedDescription)"
+                            }
+                        }
+                    } else {
+                        errorMessage = "Server returned error code: \(httpResponse.statusCode)"
+                    }
+                }
+            }
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+}
+
+// MARK: - UIResponder Extension
+extension UIResponder {
+    private static weak var _currentFirstResponder: UIResponder?
+    
+    static var currentFirstResponder: UIResponder? {
+        _currentFirstResponder = nil
+        UIApplication.shared.sendAction(#selector(UIResponder.findFirstResponder(_:)), to: nil, from: nil, for: nil)
+        return _currentFirstResponder
+    }
+    
+    @objc private func findFirstResponder(_ sender: Any) {
+        UIResponder._currentFirstResponder = self
+    }
+}
+
+// Add helper components for breaking down the view
+private struct WorkPackageBody: View {
+    let workPackage: WorkPackage
+    let isLoading: Bool
+    let isUpdating: Bool
+    let projectId: Int
+    let typeId: Int?
+    let statusId: Int?
+    let assigneeId: Int?
+    let attachments: [Attachment]
+    @Binding var descriptionSectionExpanded: Bool
+    @Binding var attachmentsSectionExpanded: Bool
+    @Binding var commentSectionExpanded: Bool
+    @Binding var customFieldsSectionExpanded: Bool
+    @Binding var commentText: String
+    @State private var showingTimeEntrySheet = false
+    @State private var showingAttachmentPicker = false
+    @State private var showingDeleteConfirmation = false
+    
+    var handleAssigneeChange: (Int?) -> Void
+    var addComment: () -> Void
+    var deleteAttachment: (String) -> Void
+        
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                StatusSection(
+                    statusId: statusId,
+                    projectId: projectId
+                )
+                
+                TimeTrackingSection(
+                    estimatedTime: workPackage.estimatedTime,
+                    spentTime: workPackage.spentTime,
+                    percentageDone: workPackage.percentageDone,
+                    showTimeEntrySheet: { showingTimeEntrySheet = true }
+                )
+                
+                AssigneeSection(
+                    assigneeId: assigneeId,
+                    assigneeName: workPackage.links.assignee?.title,
+                    handleAssigneeChange: handleAssigneeChange
+                )
+                
+                DescriptionSection(
+                    description: workPackage.description,
+                    isExpanded: $descriptionSectionExpanded
+                )
+                
+                AttachmentsSection(
+                    attachments: attachments,
+                    isExpanded: $attachmentsSectionExpanded,
+                    showAttachmentPicker: { showingAttachmentPicker = true },
+                    deleteAttachment: deleteAttachment
+                )
+                
+                CommentsSection(
+                    comments: workPackage.embedded?.activities?.embedded?.elements ?? [],
+                    isExpanded: $commentSectionExpanded,
+                    commentText: $commentText,
+                    addComment: addComment
+                )
+                
+                CustomFieldsSection(
+                    customFields: workPackage.customFields ?? [],
+                    isExpanded: $customFieldsSectionExpanded
+                )
+                
+                // Delete button at the bottom
+                Button(action: {
+                    showingDeleteConfirmation = true
+                }) {
+                    Text("Delete Work Package")
+                        .foregroundColor(.red)
+                        .padding()
+                            .frame(maxWidth: .infinity)
+                        .background(Color.red.opacity(0.1))
+                    .cornerRadius(8)
+                }
+                .padding()
+            }
+            .disabled(isLoading || isUpdating)
+            .overlay(
+                Group {
+                    if isLoading || isUpdating {
+                        ProgressView()
+                            .scaleEffect(1.5)
+                            .padding()
+                            .background(Color.white.opacity(0.7))
+                            .cornerRadius(10)
+                    }
+                }
+            )
+        }
+    }
+}
+
+// Header section with type, status, and priority
+private struct HeaderSection: View {
+    let type: WorkPackageType?
+    let status: WorkPackageStatus?
+    let priority: WorkPackagePriority?
+    let showEditAction: () -> Void
+    
+    var body: some View {
+        HStack {
+            if let type = type {
+                Label {
+                    Text(type.name)
+                        .font(.subheadline)
+                        .foregroundColor(Color(hex: type.color) ?? .blue)
+                } icon: {
+                    Image(systemName: "tag.fill")
+                        .foregroundColor(Color(hex: type.color) ?? .blue)
+                }
+                .padding(.trailing, 8)
+            }
+            
+            if let status = status {
+                Label {
+                    Text(status.name)
+                        .font(.subheadline)
+                        .foregroundColor(Color(hex: status.color) ?? .gray)
+                } icon: {
+                    Circle()
+                        .fill(Color(hex: status.color) ?? .gray)
+                        .frame(width: 12, height: 12)
+                }
+                .padding(.trailing, 8)
+            }
+            
+            if let priority = priority {
+                Label {
+                    Text(priority.name)
+                        .font(.subheadline)
+                } icon: {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundColor(priority.color != nil ? Color(hex: priority.color!) : .orange)
+                }
+            }
+            
+            Spacer()
+            
+            // Edit button
+            Button(action: showEditAction) {
+                Image(systemName: "pencil")
+                    .foregroundColor(.blue)
+            }
+        }
+        .padding(.horizontal)
+    }
+}
+
+// Dates section
+private struct DatesSection: View {
+    let startDate: String?
+    let dueDate: String?
+    let formattedDate: (String) -> String
+    
+    var body: some View {
+        if startDate != nil || dueDate != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Dates")
+                    .font(.headline)
+                
+                HStack {
+                    if let startDate = startDate {
+                        VStack(alignment: .leading) {
+                            Text("Start Date")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Text(formattedDate(startDate))
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    
+                    if let dueDate = dueDate {
+                        VStack(alignment: .leading) {
+                            Text("Due Date")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Text(formattedDate(dueDate))
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+            }
+            .padding()
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(8)
+            .padding(.horizontal)
+            
+            Divider()
+        }
+    }
+}
+
+// Time tracking section
+private struct TimeTrackingSection: View {
+    let estimatedTime: String?
+    let spentTime: String?
+    let percentageDone: Int?
+    let showTimeEntrySheet: () -> Void
+    
+    var body: some View {
+        if estimatedTime != nil || spentTime != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Time Tracking")
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    Button(action: showTimeEntrySheet) {
+                        Label("Log Time", systemImage: "clock")
+                            .font(.subheadline)
+                            .foregroundColor(.blue)
+                    }
+                }
+                
+                HStack {
+                    if let estimatedTime = estimatedTime {
+                        VStack(alignment: .leading) {
+                            Text("Estimated")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Text(estimatedTime)
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    
+                    if let spentTime = spentTime {
+                        VStack(alignment: .leading) {
+                            Text("Spent")
+                                .font(.subheadline)
+                                .foregroundColor(.secondary)
+                            Text(spentTime)
+                                .font(.body)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
+                
+                // Progress bar
+                if let percentageDone = percentageDone {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Progress: \(percentageDone)%")
+                            .font(.subheadline)
+                            .foregroundColor(.secondary)
+                        
+                        GeometryReader { geometry in
+                            ZStack(alignment: .leading) {
+                                Rectangle()
+                                    .fill(Color.gray.opacity(0.3))
+                                    .frame(width: geometry.size.width, height: 8)
+                                    .cornerRadius(4)
+                                
+                                Rectangle()
+                                    .fill(Color.blue)
+                                    .frame(width: geometry.size.width * CGFloat(percentageDone) / 100, height: 8)
+                                    .cornerRadius(4)
+                            }
+                        }
+                        .frame(height: 8)
+                    }
+                }
+            }
+            .padding()
+            .background(Color.gray.opacity(0.1))
+            .cornerRadius(8)
+            .padding(.horizontal)
+            
+            Divider()
+        }
+    }
+}
+
+// Assignee section
+private struct AssigneeSection: View {
+    let assigneeId: Int?
+    let assigneeName: String?
+    let handleAssigneeChange: (Int?) -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Assignee")
+                .font(.headline)
+            
+            HStack {
+                if let assigneeName = assigneeName {
+                    Text(assigneeName)
+                        .font(.body)
+                } else {
+                    Text("Unassigned")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                }
+                
+                Spacer()
+                
+                // Clear assignee button
+                if assigneeId != nil {
+                    Button(action: {
+                        handleAssigneeChange(nil)
+                    }) {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundColor(.gray)
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+        
+        Divider()
+    }
+}
+
+// Description section
+private struct DescriptionSection: View {
+    let description: ProjectDescription?
+    @Binding var isExpanded: Bool
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: {
+                withAnimation {
+                    isExpanded.toggle()
+                }
+            }) {
+                HStack {
+                    Text("Description")
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.gray)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            if isExpanded {
+                if let description = description, !description.html.isEmpty {
+                    HTMLText(html: description.html)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text("No description provided")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .italic()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+        
+        Divider()
+    }
+}
+
+// Attachments section
+private struct AttachmentsSection: View {
+    let attachments: [Attachment]
+    @Binding var isExpanded: Bool
+    let showAttachmentPicker: () -> Void
+    let deleteAttachment: (String) -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: {
+                withAnimation {
+                    isExpanded.toggle()
+                }
+            }) {
+                HStack {
+                    Text("Attachments (\(attachments.count))")
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    Button(action: showAttachmentPicker) {
+                        Image(systemName: "plus")
+                            .foregroundColor(.blue)
+                    }
+                    
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.gray)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            if isExpanded {
+                if !attachments.isEmpty {
+                    ScrollView {
+                        ForEach(attachments, id: \.id) { attachment in
+                            AttachmentRow(attachment: attachment, onDelete: {
+                                deleteAttachment(String(attachment.id))
+                            })
+                        }
+                    }
+                    .frame(maxHeight: 300)
+                } else {
+                    Text("No attachments")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                        .italic()
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+        
+        Divider()
+    }
+    
+    private func AttachmentRow(attachment: Attachment, onDelete: @escaping () -> Void) -> some View {
+        HStack {
+            VStack(alignment: .leading) {
+                Text(attachment.fileName)
+                    .font(.headline)
+                
+                if let size = attachment.fileSize {
+                    Text("\(formatFileSize(size))")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                }
+            }
+            
+            Spacer()
+            
+            Button(action: onDelete) {
+                Image(systemName: "trash")
+                    .foregroundColor(.red)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+    
+    private func formatFileSize(_ size: Int) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(size))
+    }
+}
+
+// Comments section
+private struct CommentsSection: View {
+    let comments: [Activity]
+    @Binding var isExpanded: Bool
+    @Binding var commentText: String
+    let addComment: () -> Void
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: {
+                withAnimation {
+                    isExpanded.toggle()
+                }
+            }) {
+                HStack {
+                    Text("Comments (\(comments.count))")
+                        .font(.headline)
+                    
+                    Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.gray)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            if isExpanded {
+                if comments.isEmpty {
+                    Text("No comments")
+                        .font(.body)
+                        .foregroundColor(.secondary)
+                } else {
+                    ForEach(comments, id: \.id) { comment in
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text(comment.author.name)
+                                    .font(.subheadline)
+                                    .fontWeight(.bold)
+                                
+                                Spacer()
+                                
+                                Text(comment.createdAt ?? "")
+                                    .font(.caption)
+                                    .foregroundColor(.secondary)
+                            }
+                            
+                            Text(comment.comment?.raw ?? "")
+                                .font(.body)
+                        }
+                        .padding()
+                        .background(Color.gray.opacity(0.05))
+                        .cornerRadius(8)
+                    }
+                }
+                
+                // Add comment
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Add a comment", text: $commentText)
+                        .padding()
+                        .background(Color.gray.opacity(0.05))
+                        .cornerRadius(8)
+                    
+                    Button(action: addComment) {
+                        Text("Post Comment")
+                            .foregroundColor(.white)
+                            .padding(.vertical, 8)
+                            .padding(.horizontal, 16)
+                            .background(Color.blue)
+                            .cornerRadius(8)
+                    }
+                    .disabled(commentText.isEmpty)
+                    .opacity(commentText.isEmpty ? 0.6 : 1)
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+        
+        Divider()
+    }
+}
+
+// Custom fields section
+private struct CustomFieldsSection: View {
+    let customFields: [CustomField]
+    @Binding var isExpanded: Bool
+    
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button(action: {
+                withAnimation {
+                    isExpanded.toggle()
+                }
+            }) {
+                        HStack {
+                    Text("Custom Fields (\(customFields.count))")
+                        .font(.headline)
+                    
+                            Spacer()
+                    
+                    Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                        .foregroundColor(.gray)
+                }
+            }
+            .buttonStyle(PlainButtonStyle())
+            
+            if isExpanded {
+                if !customFields.isEmpty {
+                    Section(header: Text("Custom Fields")) {
+                        ForEach(Array(customFields.enumerated()), id: \.element.name) { index, field in
+                            VStack(alignment: .leading) {
+                                Text(field.name)
+                                    .font(.subheadline)
+                                    .bold()
+                                Text(field.value ?? "Not set")
+                                    .font(.body)
+                            }
+                            .padding(.vertical, 4)
+                        }
+                    }
+                }
+            }
+        }
+        .padding()
+        .background(Color.gray.opacity(0.1))
+        .cornerRadius(8)
+        .padding(.horizontal)
+    }
+}
+
+// Add UserSelectionView
+struct UserSelectionView: View {
+    @Environment(\.presentationMode) var presentationMode
+    @EnvironmentObject var appState: AppState
+    
+    let currentAssignee: String?
+    let onSelect: (User?) -> Void
+    
+    @State private var users: [User] = []
+    @State private var isLoading: Bool = false
+    @State private var errorMessage: String?
+    
+    var body: some View {
+        NavigationView {
+            contentView
+                .navigationTitle("Select Assignee")
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        Button("Cancel") {
+                            presentationMode.wrappedValue.dismiss()
+                        }
+                    }
+                }
+                .onAppear {
+                    loadUsers()
+                }
+        }
+    }
+    
+    private var contentView: some View {
+        Group {
+            if isLoading {
+                loadingView
+            } else if let error = errorMessage {
+                errorView(message: error)
+            } else {
+                userListView
+            }
+        }
+    }
+    
+    private var loadingView: some View {
+        VStack(spacing: 20) {
+            ProgressView()
+                .scaleEffect(1.5)
+            Text("Loading users...")
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    private func errorView(message: String) -> some View {
+        VStack(spacing: 20) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.largeTitle)
+                .foregroundColor(.red)
+            
+            Text(message)
+                .multilineTextAlignment(.center)
+                .foregroundColor(.red)
+            
+            Button("Retry") {
+                loadUsers()
+            }
+            .padding()
+            .background(Color.blue)
+            .foregroundColor(.white)
+            .cornerRadius(8)
+        }
+        .padding()
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    
+    private var userListView: some View {
+        List {
+            Button {
+                onSelect(nil)
+                presentationMode.wrappedValue.dismiss()
+            } label: {
+                HStack {
+                    Text("Unassigned")
+                        .foregroundColor(.primary)
+                    Spacer()
+                    if currentAssignee == nil {
+                        Image(systemName: "checkmark")
+                            .foregroundColor(.blue)
+                    }
+                }
+            }
+            
+            ForEach(users) { user in
+                Button {
+                    onSelect(user)
+                    presentationMode.wrappedValue.dismiss()
+                } label: {
+                    HStack {
+                        Text(user.name)
+                            .foregroundColor(.primary)
+                        Spacer()
+                        if let currentAssignee = currentAssignee, currentAssignee == "\(user.id)" {
+                            Image(systemName: "checkmark")
+                                .foregroundColor(.blue)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    private func loadUsers() {
+        isLoading = true
+        errorMessage = nil
+        
+        guard let url = URL(string: "\(appState.apiBaseURL)/users") else {
+            isLoading = false
+            errorMessage = "Invalid API URL"
+            return
+        }
+        
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        
+        if let token = appState.accessToken {
+            request.setValue("Basic \(token)", forHTTPHeaderField: "Authorization")
+        }
+        
+        URLSession.shared.dataTask(with: request) { data, response, error in
+            let task = DispatchWorkItem {
+                isLoading = false
+                
+                if let error = error {
+                    errorMessage = "Network error: \(error.localizedDescription)"
+                    return
+                }
+                
+                guard let data = data else {
+                    errorMessage = "No data received"
+                    return
+                }
+                
+                if let httpResponse = response as? HTTPURLResponse {
+                    if (200...299).contains(httpResponse.statusCode) {
+                        do {
+                            let userCollection = try JSONDecoder().decode(UserCollection.self, from: data)
+                            self.users = userCollection.embedded.elements
+                        } catch {
+                            errorMessage = "Failed to parse users: \(error.localizedDescription)"
+                        }
+                    } else {
+                        errorMessage = "Server returned error code: \(httpResponse.statusCode)"
+                    }
+                }
+            }
+            
+            DispatchQueue.main.async(execute: task)
+        }.resume()
+    }
+}
+
+// Add AttachmentPickerView
+struct AttachmentPickerView: View {
+    let onSelect: (URL) -> Void
+    @Environment(\.presentationMode) var presentationMode
+    
+    var body: some View {
+        NavigationView {
+            VStack {
+                Text("Attachment Picker Placeholder")
+                    .padding()
+                
+                Button("Select Image") {
+                    // In a real implementation, this would show image picker
+                    presentationMode.wrappedValue.dismiss()
+                }
+                .padding()
+            }
+            .navigationTitle("Add Attachment")
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Cancel") {
+                        presentationMode.wrappedValue.dismiss()
+                    }
+                }
+            }
+        }
+    }
+}
+
+// Add HTMLText view for rendering HTML
+struct HTMLText: UIViewRepresentable {
+    let html: String
+    
+    func makeUIView(context: Context) -> UITextView {
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isScrollEnabled = false
+        return textView
+    }
+    
+    func updateUIView(_ uiView: UITextView, context: Context) {
+        if let attributedString = try? NSAttributedString(
+            data: Data(html.utf8),
+            options: [.documentType: NSAttributedString.DocumentType.html],
+            documentAttributes: nil
+        ) {
+            uiView.attributedText = attributedString
+        } else {
+            uiView.text = html
+        }
+    }
+} 

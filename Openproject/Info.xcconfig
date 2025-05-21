@@ -1,0 +1,16 @@
+// Info.xcconfig
+// This file contains build settings for Info.plist configuration
+
+// Use the existing Info.plist file instead of generating one
+GENERATE_INFOPLIST_FILE = NO
+
+// Set the specific Info.plist file to use
+INFOPLIST_FILE = $(SRCROOT)/Openproject/Info.plist
+
+// Debug configuration settings
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym
+
+// Other Info.plist related settings
+INFOPLIST_OUTPUT_FORMAT = same-as-input
+INFOPLIST_PREPROCESS = NO
+INFOPLIST_EXPAND_BUILD_SETTINGS = YES 
