@@ -28,9 +28,12 @@ struct HTMLTextView: UIViewRepresentable {
     func makeUIView(context: Context) -> UITextView {
         let textView = UITextView()
         textView.isEditable = false
-        textView.isScrollEnabled = false
+        textView.isScrollEnabled = true // Temporarily enable scrolling for diagnosis
         textView.backgroundColor = .clear
         textView.textColor = .label // Use system label color for proper dark mode support
+        textView.textContainerInset = .zero
+        textView.textContainer.lineFragmentPadding = 0
+        textView.textContainer.widthTracksTextView = true // Add this line
         return textView
     }
     
@@ -40,13 +43,44 @@ struct HTMLTextView: UIViewRepresentable {
         // Clean HTML content to handle potential issues with OpenProject specific tags
         let cleanedHtml = html.replacingOccurrences(of: "<p class=\"op-uc-p\">", with: "<p>")
         
-        // Add CSS to ensure text color adapts to system appearance
+        // Add CSS to ensure text color adapts to system appearance and proper scaling
         let css = """
             <style>
                 body {
                     color: \(UIColor.label.hexString);
                     font-family: -apple-system, system-ui;
                     font-size: 16px;
+                    margin: 0;
+                    padding: 0;
+                    width: 100%;
+                }
+
+                /* Ensure images scale to the width of the text view so they
+                   don't force the view to grow and appear zoomed */
+                img {
+                    max-width: 100%;
+                    height: auto;
+                    display: block;
+                }
+
+                /* Ensure tables don't overflow */
+                table {
+                    max-width: 100%;
+                    border-collapse: collapse;
+                }
+
+                /* Ensure pre and code blocks don't overflow */
+                pre, code {
+                    max-width: 100%;
+                    overflow-x: auto;
+                    white-space: pre-wrap;
+                    word-wrap: break-word;
+                }
+
+                /* Ensure all block elements respect container width */
+                p, div, h1, h2, h3, h4, h5, h6 {
+                    max-width: 100%;
+                    word-wrap: break-word;
                 }
             </style>
         """
@@ -66,6 +100,10 @@ struct HTMLTextView: UIViewRepresentable {
             uiView.text = cleanedHtml.replacingOccurrences(of: "<[^>]+>", with: "", options: .regularExpression)
             print("--> HTMLTextView updateUIView: Set plain text fallback.") // DEBUG
         }
+        
+        uiView.setNeedsLayout()
+        uiView.layoutIfNeeded()
+        uiView.invalidateIntrinsicContentSize()
     }
 }
 #endif
@@ -203,6 +241,38 @@ struct WorkPackageDetailView: View {
     private var priority: WorkPackagePriority? {
         guard let id = priorityId else { return nil }
         return priorities.first { $0.id == id }
+    }
+    
+    private var descriptionSection: some View {
+        VStack(alignment: .leading) {
+            Text("Description")
+                .font(.headline)
+                .padding(.bottom, 8)
+            
+            if isEditing {
+                TextEditor(text: $updatedDescription)
+                    .frame(minHeight: 200)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(Color.gray.opacity(0.3), lineWidth: 1)
+                    )
+                    .padding(.bottom, 8)
+            } else if let description = workPackage.description {
+                HTMLTextView(html: description.html)
+                    .frame(maxWidth: .infinity, minHeight: 80, alignment: .leading) // User's recent change here
+                    .id(workPackage.updatedAt)
+                    .onAppear {
+                        #if DEBUG
+                        print("--> WorkPackageDetailView Body: Rendering HTMLTextView - HTML: \(description.html), UpdatedAt: \(workPackage.updatedAt)")
+                        #endif
+                    }
+            } else {
+                Text("No description")
+                    .italic()
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.vertical, 8)
     }
     
     var body: some View {
@@ -357,33 +427,7 @@ struct WorkPackageDetailView: View {
                     .padding(.vertical, 8)
                 
                 // Description
-                VStack(alignment: .leading) {
-                    Text("Description")
-                        .font(.headline)
-                        .padding(.bottom, 8)
-                    
-                    if isEditing {
-                        TextEditor(text: $updatedDescription)
-                            .frame(minHeight: 200)
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 8)
-                                    .stroke(Color.gray.opacity(0.3), lineWidth: 1)
-                            )
-                            .padding(.bottom, 8)
-                    } else if let description = workPackage.description {
-                        // Corrected: Wrap print in let _ = ...
-                        let _ = print("--> WorkPackageDetailView Body: Rendering HTMLTextView - HTML: \(description.html), UpdatedAt: \(workPackage.updatedAt)")
-                        HTMLTextView(html: description.html)
-                            .frame(minHeight: 80)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .id(workPackage.updatedAt) // Force refresh when updatedAt changes
-                    } else {
-                        Text("No description")
-                            .italic()
-                            .foregroundColor(.secondary)
-                    }
-                }
-                .padding(.vertical, 8)
+                descriptionSection
                 
                 // Dates
                 if workPackage.startDate != nil || workPackage.dueDate != nil {
